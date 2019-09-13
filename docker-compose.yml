@@ -1,0 +1,245 @@
+version: '2.1'
+
+networks:
+  dockernet:
+    external: true
+  internal:
+
+volumes:
+    prometheus_data: {}
+#    grafana_data: {}
+
+services:
+
+  prometheus:
+    image: prom/prometheus:v2.2.0-rc.0
+    container_name: prometheus
+    volumes:
+      - ./prometheus/:/etc/prometheus/
+      - ./prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention=180d'
+      - '--web.enable-lifecycle'
+    restart: "always"
+    expose:
+      - 9090
+    networks:
+      - dockernet
+    labels:
+      org.label-schema.group: "monitoring"
+      autoheal: "true"
+    mem_limit: 3G
+  
+  alertmanager:
+    image: prom/alertmanager:v0.14.0
+    container_name: alertmanager
+    volumes: 
+      - ./alertmanager/:/etc/alertmanager/
+    command:
+      - '--config.file=/etc/alertmanager/config.yml'
+      - '--storage.path=/alertmanager'
+    restart: "always"
+    expose:
+      - 9093
+    networks:
+      - dockernet
+    labels:
+      org.label-schema.group: "monitoring"
+      autoheal: "true"
+
+  nodeexporter:
+    image: prom/node-exporter:v0.15.2
+    container_name: nodeexporter
+    user: root
+    privileged: true
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+    command:
+      - '--path.procfs=/host/proc'
+      - '--path.sysfs=/host/sys'
+      - '--collector.filesystem.ignored-mount-points=^/(sys|proc|dev|host|etc)($$|/)'
+    restart: "always"
+    expose:
+      - 9100
+    networks:
+      - dockernet
+    labels:
+      org.label-schema.group: "monitoring"
+      autoheal: "true"
+  cadvisor:
+    image: google/cadvisor:v0.28.3
+    container_name: cadvisor
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:rw
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+      #- /cgroup:/cgroup:ro #doesn't work on MacOS only for Linux
+    restart: "always"
+    expose:
+      - 8080
+    networks:
+      - dockernet
+    labels:
+      org.label-schema.group: "monitoring"
+      autoheal: "true"
+
+  bbk:
+    image: docker-bbk
+    environment:
+      - TEST_INTERVAL=300
+    container_name: bbk
+    networks:
+      - dockernet
+
+  
+  grafana:
+#    image: grafana/grafana:4.6.3
+    image: grafana/grafana
+    container_name: grafana
+    volumes:
+      - ./grafana_data:/var/lib/grafana
+      - ./grafana/datasources:/etc/grafana/datasources
+      - ./grafana/dashboards:/etc/grafana/dashboards
+      - ./grafana/setup.sh:/setup.sh
+    entrypoint: /setup.sh
+    environment:
+      - GF_SECURITY_ADMIN_USER=${ADMIN_USER:-admin}
+      - GF_SECURITY_ADMIN_PASSWORD=${ADMIN_PASSWORD:-admin}
+      - GF_USERS_ALLOW_SIGN_UP=false
+    restart: "always"
+    expose:
+      - 3000
+    networks:
+      - dockernet
+    user: "104"
+    labels:
+      - org.label-schema.group=monitoring
+      - autoheal="true"
+
+  caddy:
+    image: stefanprodan/caddy
+    container_name: caddy
+    ports:
+      - "3000:3000"
+      - "9090:9090"
+      - "9093:9093"
+    volumes:
+      - ./caddy/:/etc/caddy/
+    environment:
+      - ADMIN_USER=${ADMIN_USER:-admin}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD:-admin}
+    restart: "always"
+    networks:
+      - dockernet
+    labels:
+      org.label-schema.group: "monitoring"
+      autoheal: "true"
+
+  influxdb:
+    labels:
+      org.label-schema.group: "monitoring"
+      autoheal: "true"
+    restart: "no"
+    container_name: influxdb
+    ports:
+      - '8083:8083'
+      - '8086:8086'
+    volumes:
+      - './influxdb:/var/lib/influxdb'
+      - './influxdb/influxdb.conf:/etc/influxdb/influxdb.conf:ro'
+    image: influxdb
+    networks:
+      - dockernet
+
+  varken:
+    container_name: varken
+    image: boerderij/varken
+    volumes:
+      - ./varken/config-folder:/config
+    environment:
+      - PGID=${GID}
+      - PUID=${UID}
+      - TZ=Europe/Stockholm
+    depends_on:
+      - influxdb
+    restart: unless-stopped
+    networks:
+      - dockernet
+
+
+  telegraf:
+    labels:
+      org.label-schema.group: "monitoring"
+      autoheal: "true"
+    restart: "no"
+    container_name: telegraf-synology
+    environment:
+      - HOST_PROC=/rootfs/proc
+      - HOST_SYS=/rootfs/sys
+      - HOST_ETC=/rootfs/etc
+    volumes:
+      - './telegraf/synology/telegraf.conf:/etc/telegraf/telegraf.conf:ro'
+      - '/var/run/docker.sock:/var/run/docker.sock:ro'
+      - '/sys:/rootfs/sys:ro'
+      - '/proc:/rootfs/proc:ro'
+      - '/etc:/rootfs/etc:ro'
+      - './telegraf/synology/mibs:/root/.snmp/mibs'
+    image: nuntz/telegraf-snmp
+    #image: telegraf
+    networks:
+      - dockernet
+
+
+
+  telegraf-2:
+    labels:
+      org.label-schema.group: "monitoring"
+      autoheal: "true"
+    restart: "no"
+    container_name: telegraf-xen
+    environment:
+      - HOST_PROC=/rootfs/proc
+      - HOST_SYS=/rootfs/sys
+      - HOST_ETC=/rootfs/etc
+    volumes:
+      - './telegraf/xen/telegraf.conf:/etc/telegraf/telegraf.conf:ro'
+      - '/var/run/docker.sock:/var/run/docker.sock:ro'
+      - '/sys:/rootfs/sys:ro'
+      - '/proc:/rootfs/proc:ro'
+      - '/etc:/rootfs/etc:ro'
+      - './telegraf/xen/mibs:/root/.snmp/mibs'
+    image: nuntz/telegraf-snmp
+    #image: telegraf
+    networks:
+      - dockernet
+
+
+  telegraf-3:
+    labels:
+      org.label-schema.group: "monitoring"
+      autoheal: "true"
+    restart: "no"
+    container_name: telegraf-ubnt
+    environment:
+      - HOST_PROC=/rootfs/proc
+      - HOST_SYS=/rootfs/sys
+      - HOST_ETC=/rootfs/etc
+    volumes:
+      - './telegraf/ubnt/telegraf.conf:/etc/telegraf/telegraf.conf:ro'
+      - '/var/run/docker.sock:/var/run/docker.sock:ro'
+      - '/sys:/rootfs/sys:ro'
+      - '/proc:/rootfs/proc:ro'
+      - '/etc:/rootfs/etc:ro'
+      - './telegraf/ubnt/mibs:/root/.snmp/mibs'
+    image: nuntz/telegraf-snmp
+    #image: telegraf
+    networks:
+      - dockernet
+
